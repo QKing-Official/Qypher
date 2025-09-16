@@ -23,7 +23,7 @@ DEFAULT_MANIFEST_URL = f"{DEFAULT_REPO_URL}/raw/refs/heads/main/manifest.json"
 LAUNCHER_REPO_URL = "https://github.com/QKing-Official/Qypher"
 DEFAULT_INSTALL_DIR = os.path.join(os.environ.get("APPDATA", ""), "Qypher", "Apps")
 ICON_CACHE = os.path.join(os.environ.get("APPDATA", ""), "Qypher", "icons")
-LAUNCHER_VERSION = "1.0.0"
+LAUNCHER_VERSION = "v1.0.0"
 
 Path(DEFAULT_INSTALL_DIR).mkdir(parents=True, exist_ok=True)
 Path(ICON_CACHE).mkdir(parents=True, exist_ok=True)
@@ -109,67 +109,63 @@ class ManifestUpdateThread(QThread):
         except Exception as e:
             self.finished.emit(False, str(e), {})
 
-import os, sys, requests, subprocess, tempfile
-from PySide6.QtCore import QThread, Signal
-
-def is_version_newer(latest, current):
-    """Simple semantic version comparison"""
-    def normalize(v):
-        return [int(x) for x in v.strip("v").split(".") if x.isdigit()]
-    return normalize(latest) > normalize(current)
-
 class SelfUpdateThread(QThread):
     progress = Signal(int)
     finished = Signal(bool, str)
     info = Signal(str)
-    update_available = Signal(str)
-
-    def __init__(self, current_version):
+    update_available = Signal(str)  
+    
+    def __init__(self, current_version=LAUNCHER_VERSION):
         super().__init__()
         self.current_version = current_version
-
+        
     def run(self):
         try:
             self.info.emit("Checking for launcher updates...")
-
-            api_url = "https://api.github.com/repos/QKing-Official/Qypher/releases/latest"
+            api_url = f"https://api.github.com/repos/QKing-Official/Qypher/releases/latest"
             response = requests.get(api_url, timeout=10)
-
+            
             if response.status_code != 200:
                 self.finished.emit(False, "Failed to check for updates")
                 return
-
+                
             release_data = response.json()
-            latest_version = release_data.get("tag_name", "")
-
+            latest_version = release_data.get('tag_name', '')
+            
             if not is_version_newer(latest_version, self.current_version):
                 self.info.emit("Launcher is up to date!")
                 self.finished.emit(True, "No update needed")
                 return
-
+                
             self.update_available.emit(latest_version)
-
+            
             exe_asset = None
-            for asset in release_data.get("assets", []):
-                if "qypher" in asset["name"].lower() and asset["name"].lower().endswith(".exe"):
+            for asset in release_data.get('assets', []):
+                if asset['name'].endswith('.exe'):
                     exe_asset = asset
                     break
-
+                    
             if not exe_asset:
-                self.finished.emit(False, "No Qypher .exe found in latest release")
+                self.finished.emit(False, "No executable found in latest release")
                 return
-
-            self.info.emit(f"Downloading {exe_asset['name']} {latest_version}...")
+                
+            self.info.emit(f"Downloading launcher update {latest_version}...")
             self.progress.emit(25)
-
-            current_exe = sys.executable  
-            temp_dir = tempfile.gettempdir()
-            temp_exe = os.path.join(temp_dir, exe_asset["name"])
-
-            download_response = requests.get(exe_asset["browser_download_url"], stream=True)
-            total_size = int(download_response.headers.get("content-length", 0))
-
-            with open(temp_exe, "wb") as f:
+            
+            current_exe = sys.executable
+            current_dir = os.path.dirname(current_exe)
+            current_pid = os.getpid()
+            
+            # Use temp directory for downloads
+            temp_dir = os.path.join(os.environ.get('TEMP', os.getcwd()), 'qypher_update')
+            os.makedirs(temp_dir, exist_ok=True)
+            temp_exe = os.path.join(temp_dir, "qypher_new.exe")
+            
+            # Download the new exe to temp location
+            download_response = requests.get(exe_asset['browser_download_url'], stream=True)
+            total_size = int(download_response.headers.get('content-length', 0))
+            
+            with open(temp_exe, 'wb') as f:
                 downloaded = 0
                 for data in download_response.iter_content(chunk_size=4096):
                     f.write(data)
@@ -177,24 +173,169 @@ class SelfUpdateThread(QThread):
                     if total_size > 0:
                         progress = 25 + int((downloaded / total_size) * 50)
                         self.progress.emit(progress)
-
+                        
             self.progress.emit(75)
-            self.info.emit("Preparing update script (wait for process exit)...")
-
+            self.info.emit("Preparing updater...")
+            
+            # Create updater script in temp directory
             update_script = os.path.join(temp_dir, "update_qypher.bat")
-            pid = os.getpid()
+            current_exe_name = os.path.basename(current_exe)
+            
+            # Force kill script - no waiting, just kill everything
+            script_content = f'''@echo off
+setlocal enabledelayedexpansion
 
-            script_content = f
+echo Qypher Update: Force killing all launcher processes...
 
-            with open(update_script, "w") as f:
+:: Force kill by process name (multiple variations)
+taskkill /f /im "{current_exe_name}" >nul 2>&1
+taskkill /f /im "qypher.exe" >nul 2>&1
+taskkill /f /im "Qypher.exe" >nul 2>&1
+taskkill /f /im "qypher_launcher.exe" >nul 2>&1
+
+:: Kill by PID if available
+taskkill /f /pid {current_pid} >nul 2>&1
+
+:: Kill any process with qypher in the name
+for /f "tokens=2 delims=," %%a in ('wmic process where "name like '%%qypher%%'" get processid /format:csv ^| find /v "ProcessId"') do (
+    if not "%%a"=="" taskkill /f /pid %%a >nul 2>&1
+)
+
+:: Wait for processes to fully terminate
+timeout /t 3 /nobreak >nul 2>&1
+
+echo Taking ownership of target file...
+takeown /f "{current_exe}" /a >nul 2>&1
+icacls "{current_exe}" /grant administrators:F >nul 2>&1
+icacls "{current_dir}" /grant administrators:F >nul 2>&1
+
+echo Replacing executable...
+
+:: Create backup
+if exist "{current_exe}" (
+    copy "{current_exe}" "{current_exe}.backup" >nul 2>&1
+)
+
+:: Method 1: Direct overwrite
+copy /Y "{temp_exe}" "{current_exe}" >nul 2>&1
+if %errorlevel%==0 goto launch
+
+:: Method 2: Delete old, copy new
+if exist "{current_exe}" del /f /q "{current_exe}" >nul 2>&1
+copy /Y "{temp_exe}" "{current_exe}" >nul 2>&1
+if %errorlevel%==0 goto launch
+
+:: Method 3: Move and replace
+if exist "{current_exe}" move "{current_exe}" "{current_exe}.old" >nul 2>&1
+copy /Y "{temp_exe}" "{current_exe}" >nul 2>&1
+if %errorlevel%==0 (
+    del "{current_exe}.old" >nul 2>&1
+    goto launch
+)
+
+echo ERROR: All replacement methods failed
+goto cleanup
+
+:launch
+echo Update successful, launching new version...
+
+:: Clean up temp files first
+if exist "{temp_exe}" del "{temp_exe}" >nul 2>&1
+if exist "{current_exe}.backup" del "{current_exe}.backup" >nul 2>&1
+if exist "{current_exe}.old" del "{current_exe}.old" >nul 2>&1
+
+:: Verify the new executable exists and is valid
+if not exist "{current_exe}" (
+    echo ERROR: Updated executable not found
+    goto end
+)
+
+:: Wait a moment for file system to sync
+timeout /t 2 /nobreak >nul 2>&1
+
+:: Set working directory
+cd /d "{current_dir}"
+echo Launching from directory: %CD%
+echo Executable path: "{current_exe}"
+
+:: Method 1: PowerShell Start-Process (most reliable)
+powershell -WindowStyle Hidden -Command "Start-Process -FilePath '{current_exe}' -WorkingDirectory '{current_dir}'"
+timeout /t 3 /nobreak >nul 2>&1
+
+:: Verify if process started
+tasklist /fi "imagename eq {current_exe_name}" 2>nul | find /i "{current_exe_name}" >nul
+if %errorlevel%==0 (
+    echo Launcher restarted successfully
+    goto end
+)
+
+:: Method 2: Direct start command
+echo Trying direct start method...
+start "" /d "{current_dir}" "{current_exe}"
+timeout /t 3 /nobreak >nul 2>&1
+
+:: Check again
+tasklist /fi "imagename eq {current_exe_name}" 2>nul | find /i "{current_exe_name}" >nul
+if %errorlevel%==0 (
+    echo Launcher restarted successfully
+    goto end
+)
+
+:: Method 3: Direct execution
+echo Trying direct execution...
+"{current_exe}"
+timeout /t 3 /nobreak >nul 2>&1
+
+:: Final check
+tasklist /fi "imagename eq {current_exe_name}" 2>nul | find /i "{current_exe_name}" >nul
+if %errorlevel%==0 (
+    echo Launcher restarted successfully
+) else (
+    echo WARNING: Launcher may not have started properly
+    echo Please manually start the launcher from: "{current_exe}"
+)
+
+goto end
+
+:cleanup
+:: Clean up temp files
+if exist "{temp_exe}" del "{temp_exe}" >nul 2>&1
+if exist "{current_exe}.backup" del "{current_exe}.backup" >nul 2>&1
+
+:end
+:: Clean up temp directory
+rd /s /q "{temp_dir}" >nul 2>&1
+
+:: Self-delete
+(goto) 2>nul & del "%~f0"
+'''
+            
+            with open(update_script, 'w') as f:
                 f.write(script_content)
-
-            self.progress.emit(100)
-            self.info.emit("Update ready! Launcher will close for replacement...")
-
-            subprocess.Popen([update_script], shell=True)
-            os._exit(0)
-
+                
+            self.progress.emit(90)
+            self.info.emit("Starting update with administrator privileges...")
+            
+            try:
+                # Always use admin privileges
+                subprocess.Popen([
+                    "powershell", 
+                    "-WindowStyle", "Hidden",
+                    "-Command", 
+                    f"Start-Process '{update_script}' -Verb RunAs -WindowStyle Hidden -Wait"
+                ], shell=True, creationflags=subprocess.CREATE_NO_WINDOW)
+                
+                self.progress.emit(100)
+                self.info.emit("Update initiated. Application will be force closed and restarted.")
+                self.finished.emit(True, "Update process started")
+                
+                # Immediate forced exit - don't wait
+                QThread.msleep(500)  # Just enough time for the script to start
+                os._exit(0)  # Force immediate exit
+                
+            except Exception as e:
+                self.finished.emit(False, f"Failed to start updater: {str(e)}")
+                
         except Exception as e:
             self.finished.emit(False, str(e))
 
@@ -651,7 +792,7 @@ class QypherLauncher(QMainWindow):
         self.progress_bar.setValue(0)
         self.status_label.setText("Checking for launcher updates...")
 
-        self.self_update_thread = SelfUpdateThread(LAUNCHER_VERSION)
+        self.self_update_thread = SelfUpdateThread()
 
         self.self_update_thread.progress.connect(self.progress_bar.setValue)
         self.self_update_thread.info.connect(self.status_label.setText)
