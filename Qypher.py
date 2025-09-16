@@ -23,7 +23,7 @@ DEFAULT_MANIFEST_URL = f"{DEFAULT_REPO_URL}/raw/refs/heads/main/manifest.json"
 LAUNCHER_REPO_URL = "https://github.com/QKing-Official/Qypher"
 DEFAULT_INSTALL_DIR = os.path.join(os.environ.get("APPDATA", ""), "Qypher", "Apps")
 ICON_CACHE = os.path.join(os.environ.get("APPDATA", ""), "Qypher", "icons")
-LAUNCHER_VERSION = "v1.0.0"
+LAUNCHER_VERSION = "1.0.0"
 
 Path(DEFAULT_INSTALL_DIR).mkdir(parents=True, exist_ok=True)
 Path(ICON_CACHE).mkdir(parents=True, exist_ok=True)
@@ -109,13 +109,22 @@ class ManifestUpdateThread(QThread):
         except Exception as e:
             self.finished.emit(False, str(e), {})
 
+import os, sys, requests, subprocess, tempfile
+from PySide6.QtCore import QThread, Signal
+
+def is_version_newer(latest, current):
+    """Simple semantic version comparison"""
+    def normalize(v):
+        return [int(x) for x in v.strip("v").split(".") if x.isdigit()]
+    return normalize(latest) > normalize(current)
+
 class SelfUpdateThread(QThread):
     progress = Signal(int)
     finished = Signal(bool, str)
     info = Signal(str)
-    update_available = Signal(str)  
+    update_available = Signal(str)
 
-    def __init__(self, current_version=LAUNCHER_VERSION):
+    def __init__(self, current_version):
         super().__init__()
         self.current_version = current_version
 
@@ -123,7 +132,7 @@ class SelfUpdateThread(QThread):
         try:
             self.info.emit("Checking for launcher updates...")
 
-            api_url = f"https://api.github.com/repos/QKing-Official/Qypher/releases/latest"
+            api_url = "https://api.github.com/repos/QKing-Official/Qypher/releases/latest"
             response = requests.get(api_url, timeout=10)
 
             if response.status_code != 200:
@@ -131,7 +140,7 @@ class SelfUpdateThread(QThread):
                 return
 
             release_data = response.json()
-            latest_version = release_data.get('tag_name', '')
+            latest_version = release_data.get("tag_name", "")
 
             if not is_version_newer(latest_version, self.current_version):
                 self.info.emit("Launcher is up to date!")
@@ -141,26 +150,26 @@ class SelfUpdateThread(QThread):
             self.update_available.emit(latest_version)
 
             exe_asset = None
-            for asset in release_data.get('assets', []):
-                if asset['name'].endswith('.exe'):
+            for asset in release_data.get("assets", []):
+                if "qypher" in asset["name"].lower() and asset["name"].lower().endswith(".exe"):
                     exe_asset = asset
                     break
 
             if not exe_asset:
-                self.finished.emit(False, "No executable found in latest release")
+                self.finished.emit(False, "No Qypher .exe found in latest release")
                 return
 
-            self.info.emit(f"Downloading launcher update {latest_version}...")
+            self.info.emit(f"Downloading {exe_asset['name']} {latest_version}...")
             self.progress.emit(25)
 
-            current_exe = sys.executable
-            current_dir = os.path.dirname(current_exe)
-            temp_exe = os.path.join(current_dir, "qypher_launcher_new.exe")
+            current_exe = sys.executable  
+            temp_dir = tempfile.gettempdir()
+            temp_exe = os.path.join(temp_dir, exe_asset["name"])
 
-            download_response = requests.get(exe_asset['browser_download_url'], stream=True)
-            total_size = int(download_response.headers.get('content-length', 0))
+            download_response = requests.get(exe_asset["browser_download_url"], stream=True)
+            total_size = int(download_response.headers.get("content-length", 0))
 
-            with open(temp_exe, 'wb') as f:
+            with open(temp_exe, "wb") as f:
                 downloaded = 0
                 for data in download_response.iter_content(chunk_size=4096):
                     f.write(data)
@@ -170,26 +179,21 @@ class SelfUpdateThread(QThread):
                         self.progress.emit(progress)
 
             self.progress.emit(75)
-            self.info.emit("Preparing to restart...")
+            self.info.emit("Preparing update script (wait for process exit)...")
 
-            update_script = os.path.join(current_dir, "update_launcher.bat")
-            script_content = f'''@echo off
-timeout /t 2 /nobreak >nul
-del "{current_exe}"
-ren "{temp_exe}" "{os.path.basename(current_exe)}"
-start "" "{current_exe}"
-del "%~f0"
-'''
+            update_script = os.path.join(temp_dir, "update_qypher.bat")
+            pid = os.getpid()
 
-            with open(update_script, 'w') as f:
+            script_content = f
+
+            with open(update_script, "w") as f:
                 f.write(script_content)
 
             self.progress.emit(100)
-            self.info.emit("Update ready! Restarting launcher...")
+            self.info.emit("Update ready! Launcher will close for replacement...")
 
             subprocess.Popen([update_script], shell=True)
-
-            self.finished.emit(True, "Update completed")
+            os._exit(0)
 
         except Exception as e:
             self.finished.emit(False, str(e))
@@ -647,7 +651,7 @@ class QypherLauncher(QMainWindow):
         self.progress_bar.setValue(0)
         self.status_label.setText("Checking for launcher updates...")
 
-        self.self_update_thread = SelfUpdateThread()
+        self.self_update_thread = SelfUpdateThread(LAUNCHER_VERSION)
 
         self.self_update_thread.progress.connect(self.progress_bar.setValue)
         self.self_update_thread.info.connect(self.status_label.setText)
